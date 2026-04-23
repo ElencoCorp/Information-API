@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Running Tracker</title>
+    <style>
+        body { background: #0b0f1a; color: #fff; font-family: Arial; padding: 20px; }
+        button { background: #1565c0; color: white; padding: 8px 14px; border: none; cursor: pointer; margin-bottom: 10px; border-radius: 4px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #333; padding: 8px; text-align: center; }
+        th { background: #102030; }
+    </style>
+</head>
+<body>
+
+<h2>📊 Live Running (ATM)</h2>
+
+<input type="number" id="interval" value="15" style="width:80px;">
+<button onclick="setIntervalTime()">Set Interval</button>
+<button onclick="downloadCSV()">⬇ Download CSV</button>
+<button onclick="startRecording()">▶ Start</button>
+<button onclick="stopRecording()" style="background:#c62828;">⛔ Stop</button>
+<button onclick="resetAll()" style="background:#e65100;">🗑 Reset</button>
+
+<div id="loading">Loading data...</div>
+
+<table>
+<thead>
+<tr>
+    <th>Date Time</th><th>Expiry</th>
+    <th>CE LTP</th><th>Δ</th><th>Γ</th><th>Θ</th><th>V</th>
+    <th>STRIKE</th>
+    <th>PE LTP</th><th>Δ</th><th>Γ</th><th>Θ</th><th>V</th>
+    <th>Delta Ratio</th><th>Index LTP</th>
+    <th>Reference</th><th>Stretched</th><th>Difference</th>
+    <th>Diff Prev</th><th>Cumulative</th>
+</tr>
+</thead>
+<tbody id="tbl"></tbody>
+</table>
+
+<script>
+/*
+  FLOW:
+    Admin API → fetchData() → calculate diff_prev + cumulative → save to DB → dashboard reads DB
+
+  FORMULA:
+    diff_prev[N]  = difference[N+1] - difference[N]     ← set when next row arrives
+    cumulative[N] = cumulative[N-1] + diff_prev[N]      ← prev cumulative + THIS row's diff_prev
+
+  SAVE ORDER (critical for dashboard correctness):
+    When row N arrives:
+      1. Fix prev row (N-1): set diff_prev & cumulative
+      2. Save prev row (N-1) to DB FIRST  ← dashboard now sees correct prev values
+      3. Then compute & save current row N to DB
+*/
+
+let records     = [];
+let intervalSec = 15;
+let timer       = null;
+let isFetching  = false;
+let isRunning   = false;
+
+// ── LOCAL STORAGE ──────────────────────────────────────────────────────────
+function saveToLocal() {
+    localStorage.setItem("atm_records", JSON.stringify(records));
+}
+
+function loadFromLocal() {
+    const data = localStorage.getItem("atm_records");
+    if (data) {
+        records = JSON.parse(data);
+        // Re-render all rows from saved data
+        records.forEach((r, idx) => {
+            appendRow(r, idx);
+        });
+    }
+}
+
+// ── RESET ──────────────────────────────────────────────────────────────────
+function resetAll() {
+    if (!confirm("Reset all data?")) return;
+    stopRecording();
+    records = [];
+    document.getElementById("tbl").innerHTML = "";
+    localStorage.removeItem("atm_records");
+    startRecording();
+}
+
+// ── INTERVAL ───────────────────────────────────────────────────────────────
+function setIntervalTime() {
+    const val = parseFloat(document.getElementById("interval").value);
+    if (val > 0) {
+        intervalSec = val;
+        if (isRunning) { stopRecording(); startRecording(); }
+        alert("Interval set to " + intervalSec + " sec");
+    }
+}
+
+// ── START / STOP ───────────────────────────────────────────────────────────
+function startRecording() {
+    if (isRunning) return;
+    isRunning = true;
+    function run() {
+        if (!isRunning) return;
+        if (!isFetching) fetchData();
+        timer = setTimeout(run, intervalSec * 1000);
+    }
+    run();
+}
+
+function stopRecording() {
+    isRunning = false;
+    if (timer) clearTimeout(timer);
+}
+
+// ── SAVE ROW TO DB ─────────────────────────────────────────────────────────
+// Returns a Promise so we can await it and control save order
+function saveRowToDB(r) {
+    return fetch("/api/save-running", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(r)
+    }).catch(e => console.error("DB save failed", e));
+}
+
+// ── MAIN FETCH ─────────────────────────────────────────────────────────────
+async function fetchData() {
+    isFetching = true;
+    try {
+        const res  = await fetch("/api/full-chain");
+        const data = await res.json();
+        if (!data.rows) return;
+
+        const atmRow = data.rows.find(r => r.is_atm);
+        if (!atmRow) return;
+
+        let currentDiff = parseFloat(atmRow.difference);
+        if (isNaN(currentDiff)) currentDiff = 0;
+
+        // Build current row skeleton
+        const row = {
+            datetime:    atmRow.datetime,
+            expiry:      atmRow.expiry,
+            ce_ltp:      atmRow.ce_ltp,
+            ce_delta:    atmRow.ce_delta,
+            ce_gamma:    atmRow.ce_gamma,
+            ce_theta:    atmRow.ce_theta,
+            ce_vega:     atmRow.ce_vega,
+            strike:      atmRow.strike,
+            pe_ltp:      atmRow.pe_ltp,
+            pe_delta:    atmRow.pe_delta,
+            pe_gamma:    atmRow.pe_gamma,
+            pe_theta:    atmRow.pe_theta,
+            pe_vega:     atmRow.pe_vega,
+            delta_ratio: atmRow.delta_ratio,
+            index_ltp:   atmRow.index_ltp,
+            reference:   atmRow.reference,
+            stretched:   atmRow.stretched,
+            difference:  currentDiff,
+            diff_prev:   0,
+            running:     0
+        };
+
+        if (records.length === 0) {
+            // ── FIRST ROW ──────────────────────────────────────────────
+            // diff_prev = 0, cumulative = 0
+            row.diff_prev = 0;
+            row.running   = 0;
+
+            // Save first row to DB
+            await saveRowToDB(row);
+
+        } else {
+            const prevIdx = records.length - 1;
+            const prev    = records[prevIdx];
+
+            // STEP 1: Calculate diff_prev for the PREVIOUS row
+            //   diff_prev[N-1] = difference[N] - difference[N-1]
+            prev.diff_prev = +(currentDiff - prev.difference).toFixed(2);
+
+            // STEP 2: Calculate cumulative for the PREVIOUS row
+            //   cumulative[N-1] = cumulative[N-2] + diff_prev[N-1]
+            if (prevIdx === 0) {
+                // Row 0 has no prev-prev, so cumulative[0] = 0 + diff_prev[0]
+                prev.running = +(0 + prev.diff_prev).toFixed(2);
+            } else {
+                prev.running = +(records[prevIdx - 1].running + prev.diff_prev).toFixed(2);
+            }
+
+            // STEP 3: Re-render previous row in the table
+            rerenderRow(prevIdx, prev);
+
+            // ✅ STEP 4: Save corrected PREVIOUS row to DB FIRST
+            //    Dashboard reads this → now sees correct values for prev row
+            await saveRowToDB(prev);
+
+            // STEP 5: Set current row values
+            //   diff_prev = 0 (next hasn't arrived yet)
+            //   cumulative = prev.running + 0 = prev.running
+            row.diff_prev = 0;
+            row.running   = prev.running;
+
+            // ✅ STEP 6: Now save current row to DB
+            await saveRowToDB(row);
+        }
+
+        // Push to records array + render + save to localStorage
+        records.push(row);
+        appendRow(row, records.length - 1);
+        saveToLocal();
+
+    } catch (err) {
+        console.error("API FAIL", err);
+    }
+    isFetching = false;
+}
+
+// ── BUILD ROW HTML ─────────────────────────────────────────────────────────
+function buildRowHTML(r) {
+    const color = r.running > 0 ? "#1b5e20" : r.running < 0 ? "#b71c1c" : "#555";
+    return `
+        <td>${r.datetime}</td>
+        <td>${r.expiry}</td>
+        <td>${r.ce_ltp}</td>
+        <td>${r.ce_delta}</td>
+        <td>${r.ce_gamma}</td>
+        <td>${r.ce_theta}</td>
+        <td>${r.ce_vega}</td>
+        <td><b>${r.strike}</b></td>
+        <td>${r.pe_ltp}</td>
+        <td>${r.pe_delta}</td>
+        <td>${r.pe_gamma}</td>
+        <td>${r.pe_theta}</td>
+        <td>${r.pe_vega}</td>
+        <td>${r.delta_ratio}</td>
+        <td>${r.index_ltp}</td>
+        <td>${r.reference}</td>
+        <td>${r.stretched}</td>
+        <td>${r.difference}</td>
+        <td>${r.diff_prev.toFixed(2)}</td>
+        <td style="background:${color};color:white;">${r.running.toFixed(2)}</td>
+    `;
+}
+
+// ── APPEND NEW ROW ─────────────────────────────────────────────────────────
+function appendRow(r, idx) {
+    const tbody = document.getElementById("tbl");
+    const tr    = document.createElement("tr");
+    tr.setAttribute("data-idx", idx);
+    tr.innerHTML = buildRowHTML(r);
+    tbody.appendChild(tr);
+    tr.scrollIntoView({ behavior: "smooth" });
+}
+
+// ── RE-RENDER A ROW IN DOM ─────────────────────────────────────────────────
+function rerenderRow(idx, r) {
+    const tr = document.querySelector(`tr[data-idx="${idx}"]`);
+    if (tr) tr.innerHTML = buildRowHTML(r);
+}
+
+// ── CSV ────────────────────────────────────────────────────────────────────
+function downloadCSV() {
+    let csv = "DateTime,Expiry,Difference,DiffPrev,Cumulative\n";
+    records.forEach(r => {
+        csv += `${r.datetime},${r.expiry},${r.difference},${r.diff_prev.toFixed(2)},${r.running.toFixed(2)}\n`;
+    });
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a    = document.createElement("a");
+    a.href     = URL.createObjectURL(blob);
+    a.download = "running_data.csv";
+    a.click();
+}
+
+// ── AUTO START ─────────────────────────────────────────────────────────────
+loadFromLocal();
+startRecording();
+
+</script>
+</body>
+</html>
