@@ -36,9 +36,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploaded_csvs")
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzc2OTIwMjA1LCJpYXQiOjE3NzY4MzM4MDUsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwNTg1OTc1In0.pWxkHxA74E4InoxgF8G91dvDKqDxsrzBjO8SRfKeKTpA5kevIkKFYl8TWop8a6wXbj_Bjvf6YUL6zaP-p7ekGg"
-# ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-# CLIENT_ID  = os.getenv("CLIENT_ID")
+# ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzc2OTIwMjA1LCJpYXQiOjE3NzY4MzM4MDUsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwNTg1OTc1In0.pWxkHxA74E4InoxgF8G91dvDKqDxsrzBjO8SRfKeKTpA5kevIkKFYl8TWop8a6wXbj_Bjvf6YUL6zaP-p7ekGg"
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+CLIENT_ID  = os.getenv("CLIENT_ID")
 CLIENT_ID  = "1100585975"
 BASE_URL   = "https://api.dhan.co/v2"
 HEADERS    = {
